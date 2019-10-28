@@ -1,5 +1,5 @@
 /**
-*	Hubitat Circadian Daylight 0.80
+*	Hubitat Circadian Daylight 0.82
 *
 *	Author:
 *		Adam Kempenich
@@ -15,6 +15,8 @@
 * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
 *
 *  Changelog:
+*	0.82 (October 28 2019)
+*		- Only call getCTBright once per call to modeHandler
 *	0.81 (October 1 2019)
 *		- Fixed default color temp outside of sunrise/set times when CT overridden
 *	0.80 (May 13 2019)
@@ -321,22 +323,23 @@ private def getSunriseTime(){
     def sunRiseSet
     def sunriseTime
 
-    if(settings.zipCodeOverride == null || settings.zipCodeOverride == ""){
+    if(!settings.useSunOverrides || settings.zipCodeOverride == null || settings.zipCodeOverride == ""){
         sunRiseSet = getSunriseAndSunset()
         logDebug "getSunriseTime - System Sunrise time: ${sunRiseSet}"
     }
     else{
-	sunRiseSet = getSunriseAndSunset(zipCode: "${settings.zipCodeOverride}")
+		sunRiseSet = getSunriseAndSunset(zipCode: "${settings.zipCodeOverride}")
+
         logDebug "getSunrisetTime - Zipcode (${settings.zipCodeOverride}). Sunrise time: ${sunRiseSet}"
     }
-	
-    if(settings.sunriseOverride != null && settings.sunriseOverride != ""){
+    if(settings.useSunOverrides && settings.sunriseOverride != null && settings.sunriseOverride != ""){
         sunriseTime = new Date().parse("yyyy-MM-dd'T'HH:mm:ss.SSSZ", settings.sunriseOverride)
         logDebug "Sunrise overridden to ${sunriseTime}"
     }
-    else if(settings.sunriseOffset != null && settings.sunriseOffset != ""){
+    else if(settings.useSunOverrides && settings.sunriseOffset != null && settings.sunriseOffset != ""){
         sunriseTime = sunRiseSet.sunrise.plusMinutes(settings.sunriseOffset)
         logDebug "Sunrise offset to ${sunriseTime}"
+
     }
     else{
         sunriseTime = sunRiseSet.sunrise
@@ -346,22 +349,21 @@ private def getSunriseTime(){
 
 private def getSunsetTime(){
     def sunRiseSet
-    def sunsetTime
+    def sunriseTime
 
-    if(settings.zipCodeOverride == null || settings.zipCodeOverride == ""){
+    if(!settings.useSunOverrides || settings.zipCodeOverride == null || settings.zipCodeOverride == ""){
         sunRiseSet = getSunriseAndSunset()
         logDebug "getSunsetTime - System Sunset time: ${sunRiseSet}"
     }
     else{
-	sunRiseSet = getSunriseAndSunset(zipCode: "${settings.zipCodeOverride}")
+		sunRiseSet = getSunriseAndSunset(zipCode: "${settings.zipCodeOverride}")
         logDebug "getSunsetTime - Zipcode (${settings.zipCodeOverride}). Sunset time: ${sunRiseSet}"
     }
-	
-    if(settings.sunsetOverride != null && settings.sunsetOverride != ""){
+    if(settings.useSunOverrides && settings.sunsetOverride != null && settings.sunsetOverride != ""){
         sunsetTime = new Date().parse("yyyy-MM-dd'T'HH:mm:ss.SSSZ", settings.sunsetOverride)
         logDebug "Sunset overridden to ${sunsetTime}"
     }
-    else if(settings.sunsetOffset != null && settings.sunsetOffset != ""){
+    else if(settings.useSunOverrides && settings.sunsetOffset != null && settings.sunsetOffset != ""){
         sunsetTime = sunRiseSet.sunset.plusMinutes(settings.sunsetOffset)
         logDebug "Sunset offset to ${sunsetTime}"
     }
@@ -408,6 +410,7 @@ def scheduleTurnOn() {
 def modeHandler(evt) {
 	logDebug "modeHandler called"
 	
+    logDebug "Checking for disabled switches"
     for (disableSwitch in disablingSwitches) {
         if(!settings.disableWhenSwitchOff){
             if(disableSwitch.currentSwitch == "on") {
@@ -420,6 +423,7 @@ def modeHandler(evt) {
         }
     }
 
+    logDebug "Checking for altered dimmers"
     if(!state.justInitialized){
 		for(device in colorTemperatureDevices) {
 			if(settings.disableWhenDimmed && device.currentValue("level") != state.lastAssignedBrightness){
@@ -443,13 +447,17 @@ def modeHandler(evt) {
     else{
         state.justInitialized = false
     }
-	
-    def ct = getCT()
-    def hex = getHex()
-    def hsv = getHSV()
-    def bright = getBright()
+    
+    logDebug "Calculating next CT"
+    def ctb = getCTBright()
+    def ct = getCT(ctb)
+    def hex = getHex(ct)
+    def hsv = getHSV(ct)
+    def bright = getBright(ctb)
 
     if(!state.disabledFromDimmer){
+        logDebug "Setting color temperature devices to " + ct
+        
         for(colorTemperatureDevice in colorTemperatureDevices) {
             if(colorTemperatureDevice.currentValue("switch") == "on") {
                 if(colorTemperatureDevice.currentValue("colorTemperature") != ct) {
@@ -462,6 +470,8 @@ def modeHandler(evt) {
         }
 
         def color = [hex: hex, hue: hsv.h, saturation: hsv.s, level: bright]
+        logDebug "Setting color devices to " + hex + " at " + bright + "%"
+        
         for(colorDevice in colorDevices) {
             if(colorDevice.currentValue("switch") == "on") {
                 def tmp = colorDevice.currentValue("color")
@@ -475,6 +485,9 @@ def modeHandler(evt) {
                 }
             }
         }
+        
+        logDebug "Setting dimmable devices to " + bright + "%"
+        
         for(dimmableDevice in dimmableDevices) {
             if(dimmableDevice.currentValue("switch") == "on") {
                 if(dimmableDevice.currentValue("level") != bright) {
@@ -531,8 +544,9 @@ def checkCurrentMode(){
 }
 
 def getCTBright() {
-		
-    def brightenStart = settings.brightenTimeStart == null || settings.brightenTimeStart == "" ? null : Date.parse("yyyy-MM-dd'T'HH:mm:ss.SSSZ", settings.brightenTimeStart)
+	
+	
+	def brightenStart = settings.brightenTimeStart == null || settings.brightenTimeStart == "" ? null : Date.parse("yyyy-MM-dd'T'HH:mm:ss.SSSZ", settings.brightenTimeStart)
     def brightenEnd = settings.brightenTimeEnd == null || settings.brightenTimeEnd == "" ? null : Date.parse("yyyy-MM-dd'T'HH:mm:ss.SSSZ", settings.brightenTimeEnd)
     def dimStart = settings.dimTimeStart == null || settings.dimTimeStart == "" ? null : Date.parse("yyyy-MM-dd'T'HH:mm:ss.SSSZ", settings.dimTimeStart)
     def dimEnd = settings.dimTimeEnd == null || settings.dimTimeEnd == "" ? null : Date.parse("yyyy-MM-dd'T'HH:mm:ss.SSSZ", settings.dimTimeEnd)
@@ -552,8 +566,8 @@ def getCTBright() {
     def int warmCT = settings.warmCTOverride == null || settings.warmCTOverride == "" ? 2700 : settings.warmCTOverride
     def int midCT = coldCT - warmCT
 
-    def highBrightness = 100
-    def lowBrightness = 1
+	def highBrightness = 100
+	def lowBrightness = 1
     def fullRange = highBrightness - lowBrightness
 
 	if( settings.maxBrightnessOverride < 100 && settings.maxBrightnessOverride != null ){
@@ -609,7 +623,6 @@ def getCTBright() {
 
         }
     }
-	
     if(settings.dynamicBrightness == false) {
         if(settings.maxBrightnessOverride < 100 && settings.maxBrightnessOverride != null){
             brightness = settings.maxBrightnessOverride / 100
@@ -662,37 +675,33 @@ def getCTBright() {
             settings.mode10OverrideColorTemperature != "" && settings.mode10OverrideColorTemperature != null ? ( colorTemp = settings.mode10OverrideColorTemperature ) : null
             break
         default:
-            logDescriptionText "The current mode is not set for an override."
+            logDebug "The current mode is not set for an override."
             break
     }
 
     state.lastAssignedBrightness = brightness
 
-    def ct = [:]
-    ct = [colorTemp: colorTemp, brightness: Math.round(brightness * 100)]
-    ct
+    def ctb = [:]
+    ctb = [colorTemp: colorTemp, brightness: Math.round(brightness * 100)]
+    return ctb
 }
 
-def getCT() {
-    def ctb = getCTBright()
+def getCT(ctb) {
     logDebug "Color Temperature: ${ctb.colorTemp}"
     return ctb.colorTemp
 }
 
-def getHex() {
-    def ct = getCT()
+def getHex(ct) {
     logDebug "Hex: ${rgbToHex(ctToRGB(ct)).toUpperCase()}"
     return rgbToHex(ctToRGB(ct)).toUpperCase()
 }
 
-def getHSV() {
-    def ct = getCT()
+def getHSV(ct) {
     logDebug "HSV: ${rgbToHSV(ctToRGB(ct))}"
     return rgbToHSV(ctToRGB(ct))
 }
 
-def getBright() {
-    def ctb = getCTBright()
+def getBright(ctb) {
     logDebug "Brightness: " + ctb.brightness
     return ctb.brightness
 }
